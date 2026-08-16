@@ -1,0 +1,77 @@
+name: Test external PEPEPOW pools
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Test Stratum TCP ports
+        shell: bash
+        run: |
+          set +e
+          for target in \
+            stratum-eu.pepepow.foztor.net:13232 \
+            hoohash-pepew.eu.mine.zpool.ca:8335 \
+            pool.pepepow.net:39333 \
+            pool.pepepow.net:39334 \
+            bowserlab.ddns.net:9912; do
+            host=${target%:*}
+            port=${target##*:}
+            echo "=== TCP $target ==="
+            timeout 7 bash -c "</dev/tcp/$host/$port" >/dev/null 2>&1
+            echo "exit=$?"
+          done
+
+      - name: Inspect public API schemas
+        shell: bash
+        run: |
+          set +e
+          echo '=== Foztor /stats ==='
+          curl -L -sS --max-time 15 -A 'pepepow-monitor/1.0' https://pepepow.foztor.net/stats -o /tmp/foztor.json
+          python - <<'PY'
+          import json
+          p='/tmp/foztor.json'
+          try:
+              d=json.load(open(p))
+              print('type', type(d).__name__)
+              print('keys', list(d)[:30] if isinstance(d, dict) else 'n/a')
+              if isinstance(d, dict):
+                  for k,v in d.items():
+                      if isinstance(v, dict):
+                          print('dict', k, list(v)[:20])
+                      elif isinstance(v, list):
+                          print('list', k, 'len', len(v), 'sample', v[:1])
+          except Exception as e:
+              print('parse error', e)
+              print(open(p, errors='replace').read()[:1200])
+          PY
+
+          echo '=== zpool PEPEW / hoohash ==='
+          curl -L -sS --max-time 20 -A 'pepepow-monitor/1.0' https://www.zpool.ca/api/currencies -o /tmp/zpool-currencies.json
+          curl -L -sS --max-time 20 -A 'pepepow-monitor/1.0' https://www.zpool.ca/api/status -o /tmp/zpool-status.json
+          python - <<'PY'
+          import json
+          c=json.load(open('/tmp/zpool-currencies.json'))
+          hits=[]
+          for k,v in c.items():
+              s=(k+' '+str(v)).lower()
+              if 'pepew' in s or 'pepepow' in s or (isinstance(v,dict) and (v.get('port')==8335 or str(v.get('algo','')).lower()=='hoohash')):
+                  hits.append((k,v))
+          print('currency hits:', hits[:10])
+          s=json.load(open('/tmp/zpool-status.json'))
+          if isinstance(s,dict):
+              print('status hoohash:', s.get('hoohash'))
+              print('status keys matching:', [(k,v) for k,v in s.items() if 'hoo' in k.lower()][:10])
+          PY
+
+          echo '=== Bowserlab /site/api ==='
+          curl -L -sS -D /tmp/bowser.headers --max-time 20 -A 'pepepow-monitor/1.0' https://bowserlab.ddns.net/site/api -o /tmp/bowser.body
+          head -n 20 /tmp/bowser.headers
+          head -c 4000 /tmp/bowser.body
+          echo
