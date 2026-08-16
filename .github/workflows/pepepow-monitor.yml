@@ -57,6 +57,12 @@ jobs:
           fi
           python monitor/pepepow_monitor.py "${args[@]}"
 
+      - name: Run external pool and Stratum monitor
+        if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python monitor/external_pool_probe.py
+
       - name: Run pepepow.org website probe
         if: github.event_name != 'workflow_dispatch' || inputs.dry_run == false
         env:
