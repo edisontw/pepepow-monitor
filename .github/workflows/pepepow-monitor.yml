@@ -1,0 +1,82 @@
+name: PEPEPOW Health Monitor
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Do not send email; keep notifications pending"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: pepepow-health-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore monitor state
+        id: restore-state
+        uses: actions/cache/restore@v4
+        with:
+          path: .monitor-state
+          key: pepepow-monitor-state-${{ github.run_id }}
+          restore-keys: |
+            pepepow-monitor-state-
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run monitor
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          python monitor/pepepow_monitor.py "${args[@]}"
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .monitor-state
+          key: pepepow-monitor-state-${{ github.run_id }}
+
+      - name: Keep only recent state caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set +e
+          gh cache list --limit 100 --json id,key,createdAt \
+            --jq '[.[] | select(.key | startswith("pepepow-monitor-state-"))] | sort_by(.createdAt) | reverse | .[4:] | .[].id' \
+            | while read -r cache_id; do
+                [[ -n "$cache_id" ]] && gh cache delete "$cache_id"
+              done

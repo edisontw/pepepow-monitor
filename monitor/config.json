@@ -1,0 +1,21 @@
+{
+  "check_interval_minutes": 30,
+  "consecutive_failures": 2,
+  "http_timeout_seconds": 10,
+  "http_retries": 3,
+  "chain_stall_seconds": 1800,
+  "payment_stale_hours": 3,
+  "hashrate_drop_percent": 80,
+  "sources": {
+    "explorer_status": "https://explorer.pepepow.net/monitor/api/status",
+    "light_health": "https://light.pepepow.net/api/health",
+    "light_status": "https://light.pepepow.net/api/status",
+    "explorer_net": "https://explorer.pepepow.net/",
+    "explorer_org": "https://explorer.pepepow.org/",
+    "pool_health": "https://pool.pepepow.net/api/health",
+    "pool_summary": "https://pool.pepepow.net/api/pool/summary",
+    "pool_network": "https://pool.pepepow.net/api/network/summary",
+    "pool_blocks": "https://pool.pepepow.net/api/blocks",
+    "pool_payments": "https://pool.pepepow.net/api/payments"
+  }
+}
