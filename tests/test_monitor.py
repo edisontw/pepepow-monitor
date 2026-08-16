@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 import unittest
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "monitor" / "pepepow_monitor.py"
 spec = importlib.util.spec_from_file_location("pepepow_monitor", MODULE_PATH)
@@ -168,7 +170,8 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(first, [])
         second = monitor.process_incidents(state, sig, CONFIG, self.now)
         self.assertEqual(len(second), 1)
-        monitor.mark_event_notified(state, second[0])
+        monitor.mark_event_notified(state, second[0], 17)
+        self.assertEqual(state["incidents"]["TEST"]["issue_number"], 17)
         third = monitor.process_incidents(state, sig, CONFIG, self.now)
         self.assertEqual(third, [])
 
@@ -177,11 +180,12 @@ class IncidentTests(unittest.TestCase):
         sig = [monitor.Signal("TEST", True)]
         monitor.process_incidents(state, sig, CONFIG, self.now)
         alert = monitor.process_incidents(state, sig, CONFIG, self.now)[0]
-        monitor.mark_event_notified(state, alert)
+        monitor.mark_event_notified(state, alert, 17)
         recovered = monitor.process_incidents(state, [monitor.Signal("TEST", False)], CONFIG, self.now)
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0]["type"], "RECOVERY")
-        monitor.mark_event_notified(state, recovered[0])
+        self.assertEqual(recovered[0]["issue_number"], 17)
+        monitor.mark_event_notified(state, recovered[0], 17)
         again = monitor.process_incidents(state, [monitor.Signal("TEST", False)], CONFIG, self.now)
         self.assertEqual(again, [])
 
@@ -189,6 +193,75 @@ class IncidentTests(unittest.TestCase):
         state = monitor.default_state()
         events = monitor.process_incidents(state, [monitor.Signal("STALL", True, severity="CRITICAL", immediate=True)], CONFIG, self.now)
         self.assertEqual(len(events), 1)
+
+
+class NotificationTests(unittest.TestCase):
+    def alert_event(self, issue_number=None):
+        return {
+            "type": "ALERT",
+            "name": "EXPLORER_NODE_STALE",
+            "status": "ACTIVE",
+            "severity": "WARNING",
+            "opened_at": "2026-08-16T04:00:00Z",
+            "last_seen_at": "2026-08-16T05:00:00Z",
+            "evidence": {"explorer_height": 100, "light_height": 110},
+            "url": "https://explorer.pepepow.net/monitor/api/status",
+            "issue_number": issue_number,
+        }
+
+    def test_alert_issue_is_assigned_to_repo_owner(self):
+        calls = []
+
+        def fake_api(method, path, payload=None):
+            calls.append((method, path, payload))
+            return True, {"number": 23}, "ok"
+
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "edisontw/pepepow-monitor"}, clear=False):
+            with mock.patch.object(monitor, "github_api", side_effect=fake_api):
+                ok, number, note = monitor.notify_github_issue(self.alert_event(), obs(), dry_run=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(number, 23)
+        self.assertEqual(note, "Issue #23 created")
+        self.assertEqual(calls[0][0:2], ("POST", "issues"))
+        self.assertEqual(calls[0][2]["assignees"], ["edisontw"])
+        self.assertIn("[PEPEPOW ALERT] WARNING", calls[0][2]["title"])
+
+    def test_existing_issue_gets_update_instead_of_duplicate(self):
+        with mock.patch.object(monitor, "github_api", return_value=(True, {}, "ok")) as api:
+            ok, number, _ = monitor.notify_github_issue(self.alert_event(23), obs(), dry_run=False)
+        self.assertTrue(ok)
+        self.assertEqual(number, 23)
+        api.assert_called_once()
+        self.assertEqual(api.call_args.args[0:2], ("POST", "issues/23/comments"))
+
+    def test_recovery_comments_then_closes_issue(self):
+        event = self.alert_event(23)
+        event["type"] = "RECOVERY"
+        event["recovered_at"] = "2026-08-16T05:30:00Z"
+        calls = []
+
+        def fake_api(method, path, payload=None):
+            calls.append((method, path, payload))
+            return True, {}, "ok"
+
+        with mock.patch.object(monitor, "github_api", side_effect=fake_api):
+            ok, number, note = monitor.notify_github_issue(event, obs(), dry_run=False)
+
+        self.assertTrue(ok)
+        self.assertEqual(number, 23)
+        self.assertEqual(note, "Issue #23 recovered and closed")
+        self.assertEqual(calls[0][0:2], ("POST", "issues/23/comments"))
+        self.assertEqual(calls[1][0:2], ("PATCH", "issues/23"))
+        self.assertEqual(calls[1][2]["state"], "closed")
+
+    def test_manual_dry_run_never_calls_github(self):
+        with mock.patch.object(monitor, "github_api") as api:
+            ok, number, note = monitor.notify_github_issue(self.alert_event(), obs(), dry_run=True)
+        self.assertFalse(ok)
+        self.assertIsNone(number)
+        self.assertIn("dry-run", note)
+        api.assert_not_called()
 
 
 if __name__ == "__main__":
