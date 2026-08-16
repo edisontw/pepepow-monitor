@@ -25,6 +25,18 @@ Lightweight, read-only PEPEPOW network/service monitoring using GitHub Actions a
   - if Cloudflare challenges the GitHub runner, status is `CF-BLOCKED` and no outage Issue is opened
 - `pool.pepepow.net` read-only API
   - health, pool summary, network summary, blocks and payments
+- PEPEPOW Stratum / external pools
+  - Foztor: `stratum-eu.pepepow.foztor.net:13232`
+  - zpool: `hoohash-pepew.eu.mine.zpool.ca:8335`
+  - PEPEPOW PPLNS: `pool.pepepow.net:39333`
+  - PEPEPOW SOLO: `pool.pepepow.net:39334`
+  - Bowserlab: `bowserlab.ddns.net:9912`
+  - each Stratum endpoint is checked with a short TCP connection only; no mining login or share submission is performed
+  - Foztor is additionally checked through `https://pepepow.foztor.net/api/stats`
+  - zpool is checked through `/api/status` and `/api/currencies`
+  - Bowserlab is checked through `/api/status` and `/api/currencies`
+  - missing PEPEW/Hoohash entries, port mismatches, API failures, and explicit zpool PEPEW API errors can trigger incidents
+  - zero workers, zero pool hashrate, and long time since a block do **not** by themselves trigger alerts
 
 The monitor cross-checks explorer height against PEPEW Light so a stale explorer node is not mistaken for a network-wide chain stall.
 
@@ -33,6 +45,8 @@ The monitor cross-checks explorer height against PEPEW Light so a stale explorer
 GitHub Actions runs at minute 7 and 37 of every hour (approximately every 30 minutes). GitHub scheduled workflows can occasionally start late.
 
 Warnings normally require two consecutive failed runs. A chain stall is only treated as critical when independent evidence agrees. Normal latency and small height differences are ignored.
+
+External-pool incidents also require two consecutive runs. Examples include `FOZTOR_STRATUM_DOWN`, `ZPOOL_API_DOWN`, `PEPEPOW_SOLO_STRATUM_DOWN`, `BOWSERLAB_API_DOWN`, and `ZPOOL_PEPEW_API_WARNING`.
 
 ## Incident lifecycle
 
@@ -65,7 +79,7 @@ Separately, GitHub Actions workflow-failure notifications can be enabled so fail
 
 Open **Actions -> PEPEPOW Health Monitor -> Run workflow**.
 
-`dry_run` defaults to `true`, so the main network/service monitor runs without creating, updating, or closing GitHub Issues. The `pepepow.org` website probe is skipped in this default dry run to avoid modifying its incident state. Set `dry_run` to `false` only when an actual live notification test is intended. Scheduled runs are live.
+`dry_run` defaults to `true`, so the main network/service monitor runs without creating, updating, or closing GitHub Issues. The external-pool and `pepepow.org` probes are skipped in this default dry run so their persistent incident state is not changed. Set `dry_run` to `false` only when an actual live notification test is intended. Scheduled runs are live.
 
 ## GitHub permissions
 
@@ -94,6 +108,8 @@ Defaults:
 
 The `pepepow.org` probe is intentionally small and independent. Its current defaults are two consecutive failures, a 12-second HTTP timeout, and at most 12 sampled image URLs per run.
 
+The external-pool probe is also independent. It uses two TCP attempts with a short timeout and requires two consecutive failed scheduled runs before opening a normal incident Issue.
+
 ## Public incident data
 
 GitHub Issues are public because this repository is public. Incident Issues should contain only public monitoring information such as:
@@ -104,6 +120,7 @@ GitHub Issues are public because this repository is public. Incident Issues shou
 - public API/service status
 - public endpoint URLs
 - public website/image HTTP status
+- public pool/Stratum hostname and port status
 
 Do not add email addresses, private IP addresses, credentials, wallet data, private RPC information, server paths, or other sensitive operational data to Issues.
 
@@ -114,9 +131,11 @@ This repository is monitoring only. It does not:
 - access daemon RPC or wallet RPC
 - access SSH
 - submit blocks or transactions
+- authenticate to Stratum pools
+- submit mining shares
 - send coins or trigger payouts
 - restart or modify production services
 - store wallet secrets or private keys
 - store SMTP credentials or recipient email addresses
 
-All monitored endpoints are public read-only endpoints.
+All monitored endpoints are public read-only endpoints or public TCP service ports.
