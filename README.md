@@ -16,6 +16,13 @@ Lightweight, read-only PEPEPOW network/service monitoring using GitHub Actions a
 - `explorer.pepepow.org`
   - best-effort public site probe
   - Cloudflare currently challenges GitHub-hosted runners with HTTP 403; a recognized Cloudflare challenge is shown as `CF-BLOCKED` and is **not** treated as an outage
+- `pepepow.org`
+  - independent best-effort website probe managed separately from the explorer checks
+  - checks public HTML availability when GitHub-hosted runners can reach it
+  - when HTML is readable, samples up to 12 homepage / lazy-loaded / OG / Twitter image URLs
+  - same-site image HTTP/HTML failures can become `PEPEPOW_ORG_IMAGES_BROKEN` after two consecutive runs
+  - external-image failures are informational only to reduce false positives from third-party hotlink protection
+  - if Cloudflare challenges the GitHub runner, status is `CF-BLOCKED` and no outage Issue is opened
 - `pool.pepepow.net` read-only API
   - health, pool summary, network summary, blocks and payments
 
@@ -58,7 +65,7 @@ Separately, GitHub Actions workflow-failure notifications can be enabled so fail
 
 Open **Actions -> PEPEPOW Health Monitor -> Run workflow**.
 
-`dry_run` defaults to `true`, so a manual test runs all health checks and incident logic without creating, updating, or closing GitHub Issues. Scheduled runs are live.
+`dry_run` defaults to `true`, so the main network/service monitor runs without creating, updating, or closing GitHub Issues. The `pepepow.org` website probe is skipped in this default dry run to avoid modifying its incident state. Set `dry_run` to `false` only when an actual live notification test is intended. Scheduled runs are live.
 
 ## GitHub permissions
 
@@ -72,7 +79,7 @@ No additional notification credentials are required.
 
 ## Configuration
 
-Edit `monitor/config.json`.
+Edit `monitor/config.json` for the network/service monitor.
 
 Defaults:
 
@@ -85,6 +92,8 @@ Defaults:
 - retries: 3
 - maximum JSON response: 20 MB
 
+The `pepepow.org` probe is intentionally small and independent. Its current defaults are two consecutive failures, a 12-second HTTP timeout, and at most 12 sampled image URLs per run.
+
 ## Public incident data
 
 GitHub Issues are public because this repository is public. Incident Issues should contain only public monitoring information such as:
@@ -94,6 +103,7 @@ GitHub Issues are public because this repository is public. Incident Issues shou
 - public network hashrate
 - public API/service status
 - public endpoint URLs
+- public website/image HTTP status
 
 Do not add email addresses, private IP addresses, credentials, wallet data, private RPC information, server paths, or other sensitive operational data to Issues.
 
