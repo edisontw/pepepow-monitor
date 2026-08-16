@@ -1,7 +1,6 @@
 name: PEPEPOW Health Monitor
 
 on:
-  push:
   schedule:
     - cron: "7,37 * * * *"
   workflow_dispatch:
