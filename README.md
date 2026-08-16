@@ -32,44 +32,43 @@ Warnings normally require two consecutive failed runs. A chain stall is only tre
 `NEW -> ACTIVE -> RECOVERED -> CLOSED`
 
 - first warning observation: record only
-- second consecutive warning observation: one alert email
-- while active: do not repeat the same email
-- severity escalation: alert again
-- recovery: one recovery email
+- second consecutive warning observation: create one GitHub Issue
+- while active: do not create duplicate Issues
+- severity escalation: add an update comment to the existing Issue
+- recovery: add a `RECOVERED` comment and automatically close the Issue
 
 State is stored in a small GitHub Actions cache. The workflow keeps only the four newest monitor-state caches.
 
-## Email setup
+## Notifications
 
-Monitoring works without email secrets, but alert emails remain pending until email delivery is configured.
+The monitor uses GitHub Issues as the incident notification channel. SMTP and recipient email addresses are not used or stored by this repository.
 
-Repository settings:
+When a confirmed incident is opened:
 
-`Settings -> Secrets and variables -> Actions -> New repository secret`
+1. `github-actions[bot]` creates an Issue such as `[PEPEPOW ALERT] WARNING - EXPLORER_NODE_STALE`.
+2. The Issue is assigned to the repository owner to make GitHub notification delivery more reliable.
+3. GitHub can deliver the Issue notification through GitHub Inbox and, depending on the account notification settings, email.
+4. When the service recovers, the monitor posts a recovery comment and closes the Issue.
 
-Add:
+To receive email notifications, configure the desired email address in the GitHub account notification settings. No recipient address needs to be added to this repository or to Actions Secrets.
 
-- `SMTP_HOST`
-- `SMTP_PORT`
-- `SMTP_USERNAME`
-- `SMTP_PASSWORD`
-- `SMTP_FROM` (optional; defaults to `SMTP_USERNAME`)
-- `ALERT_EMAIL_TO` (**required for alert delivery; keep the recipient address only in GitHub Actions Secrets**)
-
-Example for a Gmail sender using an App Password:
-
-- `SMTP_HOST = smtp.gmail.com`
-- `SMTP_PORT = 465`
-- `SMTP_USERNAME = your-gmail-address`
-- `SMTP_PASSWORD = your-app-password`
-
-Do not commit SMTP credentials, recipient email addresses, or other personal notification destinations into the repository.
+Separately, GitHub Actions workflow-failure notifications can be enabled so failures of the monitoring system itself are also reported.
 
 ## Manual test
 
 Open **Actions -> PEPEPOW Health Monitor -> Run workflow**.
 
-`dry_run` defaults to `true`, so a manual first run will exercise the monitor without sending email. Scheduled runs are live and will send alerts if the required email secrets are configured.
+`dry_run` defaults to `true`, so a manual test runs all health checks and incident logic without creating, updating, or closing GitHub Issues. Scheduled runs are live.
+
+## GitHub permissions
+
+The workflow has only the permissions required for this design:
+
+- `contents: read`
+- `actions: write` for the small state cache cleanup
+- `issues: write` for alert/recovery Issues
+
+No additional notification credentials are required.
 
 ## Configuration
 
@@ -86,6 +85,18 @@ Defaults:
 - retries: 3
 - maximum JSON response: 20 MB
 
+## Public incident data
+
+GitHub Issues are public because this repository is public. Incident Issues should contain only public monitoring information such as:
+
+- timestamps
+- public chain heights
+- public network hashrate
+- public API/service status
+- public endpoint URLs
+
+Do not add email addresses, private IP addresses, credentials, wallet data, private RPC information, server paths, or other sensitive operational data to Issues.
+
 ## Safety boundary
 
 This repository is monitoring only. It does not:
@@ -96,5 +107,6 @@ This repository is monitoring only. It does not:
 - send coins or trigger payouts
 - restart or modify production services
 - store wallet secrets or private keys
+- store SMTP credentials or recipient email addresses
 
 All monitored endpoints are public read-only endpoints.
