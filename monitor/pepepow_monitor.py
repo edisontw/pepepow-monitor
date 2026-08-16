@@ -7,23 +7,20 @@ import argparse
 import hashlib
 import json
 import os
-import smtplib
-import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-USER_AGENT = "PEPEPOW-GitHub-Monitor/2.0 (+https://github.com/edisontw/pepepow-monitor)"
+USER_AGENT = "PEPEPOW-GitHub-Monitor/3.0 (+https://github.com/edisontw/pepepow-monitor)"
 TAIPEI = ZoneInfo("Asia/Taipei")
 SEVERITY_ORDER = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
-STATE_VERSION = 2
+STATE_VERSION = 3
 MAX_RESPONSE_BYTES = 20_000_000
 
 
@@ -119,10 +116,7 @@ def fetch(url: str, *, timeout: int, retries: int, expect_json: bool = True) -> 
                 body = exc.read(4000).decode("utf-8", errors="replace")
             except Exception:
                 body = ""
-            last = FetchResult(
-                url, False, status=exc.code, text=body, latency_ms=latency,
-                error=f"HTTP {exc.code}",
-            )
+            last = FetchResult(url, False, status=exc.code, text=body, latency_ms=latency, error=f"HTTP {exc.code}")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             latency = round((time.perf_counter() - started) * 1000, 2)
             last = FetchResult(url, False, latency_ms=latency, error=f"{exc.__class__.__name__}: {exc}")
@@ -379,8 +373,6 @@ def evaluate(
             evidence={"status": getattr(net_result, "status", None), "error": net_result.error},
             url=urls["explorer_net"],
         ))
-        # GitHub-hosted runners are challenged by Cloudflare on pepepow.org.
-        # That is "not observable from this runner", not evidence of an outage.
         signals.append(Signal(
             "EXPLORER_ORG_SITE_DOWN", (not org_site_ok) and (not org_cf_blocked),
             evidence={"status": getattr(org_result, "status", None), "error": org_result.error},
@@ -484,6 +476,7 @@ def process_incidents(
                         "url": signal.url,
                         "alert_notified": False,
                         "recovery_notified": False,
+                        "issue_number": None,
                     }
                     incidents[name] = incident
                 else:
@@ -506,10 +499,12 @@ def process_incidents(
     return events
 
 
-def mark_event_notified(state: dict[str, Any], event: dict[str, Any]) -> None:
+def mark_event_notified(state: dict[str, Any], event: dict[str, Any], issue_number: int | None = None) -> None:
     incident = state.get("incidents", {}).get(event["name"])
     if not incident:
         return
+    if issue_number is not None:
+        incident["issue_number"] = issue_number
     if event["type"] == "ALERT":
         incident["alert_notified"] = True
         incident["last_notified_at"] = iso()
@@ -530,83 +525,132 @@ def snapshot_last_values(state: dict[str, Any], obs: dict[str, Any]) -> None:
     }
 
 
-def event_email(event: dict[str, Any], obs: dict[str, Any]) -> tuple[str, str]:
-    name = event["name"]
-    if event["type"] == "RECOVERY":
-        return (
-            f"[PEPEPOW RECOVERED] {name}",
-            "\n".join([
-                "PEPEPOW 監控已確認服務恢復。",
-                "",
-                f"事件：{name}",
-                f"恢復時間：{taipei_text(event.get('recovered_at'))}",
-                f"先前嚴重度：{event.get('severity', '-')}",
-                f"事件開始：{taipei_text(event.get('opened_at'))}",
-                f"目前 Explorer height：{obs.get('explorer_height')}",
-                f"目前 Light height：{obs.get('light_height')}",
-            ]),
-        )
-    evidence = json.dumps(event.get("evidence") or {}, ensure_ascii=False, indent=2, sort_keys=True)
-    return (
-        f"[PEPEPOW ALERT] {event.get('severity', 'WARNING')} - {name}",
-        "\n".join([
-            "PEPEPOW 自動監控偵測到持續性異常。",
-            "",
-            f"時間：{taipei_text(event.get('last_seen_at'))}",
-            f"Severity：{event.get('severity', 'WARNING')}",
-            f"事件：{name}",
-            f"持續起點：{taipei_text(event.get('opened_at'))}",
-            "",
-            "Observed:",
-            evidence,
-            "",
-            f"Explorer height：{obs.get('explorer_height')}",
-            f"Light height：{obs.get('light_height')}",
-            f"Network hashrate：{obs.get('explorer_hashrate')}",
-            f"Last block age：{obs.get('last_block_age')} s",
-            "",
-            f"相關 URL：{event.get('url') or '-'}",
-            "",
-            "Possible cause: 未自動判定。請依上述 observed evidence 人工檢查。",
-        ]),
+def github_api(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+    if not token or not repo:
+        return False, None, "GitHub token/repository unavailable; notification remains pending"
+    url = f"https://api.github.com/repos/{repo}/{path.lstrip('/')}"
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+        },
+        method=method,
     )
-
-
-def send_email(subject: str, body: str, recipient: str, *, dry_run: bool) -> tuple[bool, str]:
-    if dry_run:
-        return False, f"dry-run: {subject}"
-    host = os.getenv("SMTP_HOST", "").strip()
-    username = os.getenv("SMTP_USERNAME", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "")
-    sender = os.getenv("SMTP_FROM", "").strip() or username
-    port = int(os.getenv("SMTP_PORT", "465") or 465)
-    if not host or not username or not password or not sender:
-        return False, "SMTP secrets missing; alert remains pending"
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg.set_content(body)
-    context = ssl.create_default_context()
     try:
-        if port == 465:
-            with smtplib.SMTP_SSL(host, port, timeout=20, context=context) as server:
-                server.login(username, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(host, port, timeout=20) as server:
-                server.ehlo()
-                server.starttls(context=context)
-                server.ehlo()
-                server.login(username, password)
-                server.send_message(msg)
-        return True, "sent"
-    except Exception as exc:
-        return False, f"SMTP send failed: {exc.__class__.__name__}: {exc}"
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(2_000_000)
+            result = json.loads(raw.decode("utf-8")) if raw else {}
+            return True, result, "ok"
+    except urllib.error.HTTPError as exc:
+        return False, None, f"GitHub API HTTP {exc.code}"
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        return False, None, f"GitHub API {exc.__class__.__name__}"
 
 
-def summary_markdown(obs: dict[str, Any], state: dict[str, Any], email_notes: list[str]) -> str:
+def alert_issue_content(event: dict[str, Any], obs: dict[str, Any]) -> tuple[str, str]:
+    name = event["name"]
+    severity = event.get("severity", "WARNING")
+    title = f"[PEPEPOW ALERT] {severity} - {name}"
+    evidence = json.dumps(event.get("evidence") or {}, ensure_ascii=False, indent=2, sort_keys=True)
+    body = "\n".join([
+        "PEPEPOW 自動監控偵測到持續性異常。",
+        "",
+        f"- 時間：{taipei_text(event.get('last_seen_at'))}",
+        f"- Severity：**{severity}**",
+        f"- 事件：`{name}`",
+        f"- 持續起點：{taipei_text(event.get('opened_at'))}",
+        f"- Explorer height：`{obs.get('explorer_height')}`",
+        f"- Light height：`{obs.get('light_height')}`",
+        f"- Network hashrate：`{obs.get('explorer_hashrate')}` H/s",
+        f"- Last block age：`{obs.get('last_block_age')}` s",
+        "",
+        "### Observed",
+        "```json",
+        evidence,
+        "```",
+        "",
+        f"相關公開 URL：{event.get('url') or '-'}",
+        "",
+        "> Possible cause：未自動判定。請依上述 observed evidence 人工檢查。",
+        "",
+        "<!-- pepepow-monitor-alert -->",
+    ])
+    return title, body
+
+
+def recovery_comment(event: dict[str, Any], obs: dict[str, Any]) -> str:
+    return "\n".join([
+        "## RECOVERED",
+        "",
+        "PEPEPOW 監控已確認此事件恢復。",
+        "",
+        f"- 恢復時間：{taipei_text(event.get('recovered_at'))}",
+        f"- 事件開始：{taipei_text(event.get('opened_at'))}",
+        f"- 先前嚴重度：{event.get('severity', '-')}",
+        f"- Explorer height：`{obs.get('explorer_height')}`",
+        f"- Light height：`{obs.get('light_height')}`",
+        "",
+        "此 Issue 由監控系統自動關閉。",
+        "",
+        "<!-- pepepow-monitor-recovery -->",
+    ])
+
+
+def notify_github_issue(event: dict[str, Any], obs: dict[str, Any], *, dry_run: bool) -> tuple[bool, int | None, str]:
+    if dry_run:
+        return False, None, f"dry-run: {event['type']} {event['name']}"
+
+    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+    issue_number = _to_int(event.get("issue_number"))
+
+    if event["type"] == "ALERT":
+        if issue_number:
+            comment = "\n".join([
+                "## ALERT UPDATE",
+                "",
+                f"Severity 已更新為 **{event.get('severity', 'WARNING')}**。",
+                f"時間：{taipei_text(event.get('last_seen_at'))}",
+                "",
+                "此事件仍持續中。",
+            ])
+            ok, _, note = github_api("POST", f"issues/{issue_number}/comments", {"body": comment})
+            return ok, issue_number, f"Issue #{issue_number} updated" if ok else note
+
+        title, body = alert_issue_content(event, obs)
+        owner = repo.split("/", 1)[0] if "/" in repo else ""
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if owner:
+            payload["assignees"] = [owner]
+        ok, result, note = github_api("POST", "issues", payload)
+        if not ok:
+            return False, None, note
+        number = _to_int(result.get("number") if isinstance(result, dict) else None)
+        if number is None:
+            return False, None, "GitHub issue created but issue number was missing"
+        return True, number, f"Issue #{number} created"
+
+    if not issue_number:
+        return True, None, "Recovered before an issue was created; closed locally"
+
+    comment = recovery_comment(event, obs)
+    ok_comment, _, note = github_api("POST", f"issues/{issue_number}/comments", {"body": comment})
+    if not ok_comment:
+        return False, issue_number, note
+    ok_close, _, note = github_api("PATCH", f"issues/{issue_number}", {"state": "closed", "state_reason": "completed"})
+    if not ok_close:
+        return False, issue_number, note
+    return True, issue_number, f"Issue #{issue_number} recovered and closed"
+
+
+def summary_markdown(obs: dict[str, Any], state: dict[str, Any], notification_notes: list[str]) -> str:
     r: dict[str, FetchResult] = obs["results"]
     active = [name for name, inc in state.get("incidents", {}).items() if inc.get("status") == "ACTIVE"]
     org_status = "OK" if r["explorer_org_site"].ok else (
@@ -641,8 +685,8 @@ def summary_markdown(obs: dict[str, Any], state: dict[str, Any], email_notes: li
         lines += ["", "## Failed probes"]
         for key, value in failures:
             lines.append(f"- {key}: status={value.status}, error={value.error}")
-    if email_notes:
-        lines += ["", "## Notification", *[f"- {note}" for note in email_notes]]
+    if notification_notes:
+        lines += ["", "## GitHub Issue notification", *[f"- {note}" for note in notification_notes]]
     return "\n".join(lines) + "\n"
 
 
@@ -657,9 +701,9 @@ def main() -> int:
     if not config:
         print("Configuration missing or invalid", file=sys.stderr)
         return 2
+
     state = load_json(Path(args.state), default_state())
     if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
-        # State schema v2 intentionally clears the early diagnostic false incidents.
         state = default_state()
 
     now = utcnow()
@@ -667,18 +711,17 @@ def main() -> int:
     update_change_tracking(state, obs, now)
     events = process_incidents(state, evaluate(obs, state, config, now), config, now)
 
-    recipient = os.getenv("ALERT_EMAIL_TO", "").strip() or config.get("alert_email_to", "")
-    email_notes: list[str] = []
+    notification_notes: list[str] = []
     for event in events:
-        subject, body = event_email(event, obs)
-        sent, note = send_email(subject, body, recipient, dry_run=args.dry_run)
-        email_notes.append(note)
-        if sent:
-            mark_event_notified(state, event)
+        notified, issue_number, note = notify_github_issue(event, obs, dry_run=args.dry_run)
+        notification_notes.append(note)
+        if notified:
+            mark_event_notified(state, event, issue_number)
 
     snapshot_last_values(state, obs)
     save_json(Path(args.state), state)
-    summary = summary_markdown(obs, state, email_notes)
+
+    summary = summary_markdown(obs, state, notification_notes)
     print(summary)
     if path := os.getenv("GITHUB_STEP_SUMMARY"):
         with open(path, "a", encoding="utf-8") as handle:
