@@ -5,44 +5,20 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Inspect Foztor and Bowserlab APIs
-        shell: bash
-        run: |
-          set +e
-          for url in \
-            https://pepepow.foztor.net/api/stats \
-            https://pepepow.foztor.net/api/pool_stats \
-            https://bowserlab.ddns.net/api/status \
-            https://bowserlab.ddns.net/api/currencies; do
-            echo "=== $url ==="
-            curl -L -sS --max-time 20 -A 'pepepow-monitor/1.0' "$url" -o /tmp/body
-            python - <<'PY'
-          import json
-          p='/tmp/body'
-          try:
-              d=json.load(open(p))
-              print('type', type(d).__name__)
-              if isinstance(d,dict):
-                  print('keys', list(d)[:30])
-                  hits=[]
-                  for k,v in d.items():
-                      s=(str(k)+' '+str(v)).lower()
-                      if 'pepew' in s or 'pepepow' in s or (isinstance(v,dict) and v.get('port') in (9912,13232)):
-                          hits.append((k,v))
-                  print('PEPEW/port hits', hits[:10])
-                  for k,v in list(d.items())[:8]:
-                      if isinstance(v,dict): print('dict',k,list(v)[:20])
-                      elif isinstance(v,list): print('list',k,'len',len(v),'sample',v[:1])
-              elif isinstance(d,list):
-                  print('len',len(d),'sample',d[:1])
-          except Exception as e:
-              print('parse error',e)
-              print(open(p,errors='replace').read()[:1500])
-          PY
-          done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run all unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Run external pool monitor dry-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python monitor/external_pool_probe.py --dry-run --state /tmp/external-pools.json
